@@ -1,3 +1,518 @@
 //! The `wally` command line.
 
-fn main() {}
+use std::env;
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command as Process, ExitCode};
+use std::time::{Duration, SystemTime};
+
+use anyhow::{Context, Result, bail};
+use clap::{CommandFactory, Parser, Subcommand};
+use serde_json::json;
+
+use wally::config::{Config, Key};
+use wally::desktop::{self, Screen};
+use wally::engine::{self, Targets};
+use wally::rotation::State;
+use wally::{banner, daemon, launchd, library, paths};
+
+/// What the bare `wally help` lists after the commands.
+const AFTER_HELP: &str = "\
+Files
+  ~/.config/wally/config.yaml      the configuration (wally settings)
+  ~/.local/state/wally/state.json  what each screen shows, what comes next
+  ~/Library/Logs/wally/wally.log   the daemon log
+
+Environment
+  WALLY_NO_BANNER   hide the banner
+  NO_COLOR          no colour
+
+Examples
+  wally settings source add ~/Pictures/Wallpapers
+  wally settings set interval 15m
+  wally daemon install           start at login, change every interval
+  wally show                     which image is on which screen
+  wally next                     change now
+  wally search forest            images whose name contains \"forest\"";
+
+/// Wally rotates your wallpapers, screen by screen.
+#[derive(Parser)]
+#[command(name = "wally", version, after_help = AFTER_HELP)]
+struct Cli {
+    /// Hide the banner.
+    #[arg(long, global = true)]
+    no_banner: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Whether the daemon runs, where images come from, when they change next.
+    Status {
+        /// JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Which image is on which screen, left to right.
+    ///
+    /// Read from macOS itself, so it is exact even when the image was not put
+    /// there by wally.
+    Show {
+        /// Full paths instead of file names.
+        #[arg(long, conflicts_with = "json")]
+        paths: bool,
+        /// JSON output (screen, id, name, path).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change the wallpapers now, and restart the interval.
+    Next {
+        /// Only this screen: its number in `wally show`, or part of its name.
+        #[arg(long, short)]
+        screen: Option<String>,
+        /// Say nothing.
+        #[arg(long, short)]
+        quiet: bool,
+    },
+    /// Find images of the sources by file name.
+    ///
+    /// Case is ignored. Several words add up: a name has to contain them all,
+    /// in any order. With no word, the whole library is listed.
+    Search {
+        /// Words the file name has to contain.
+        words: Vec<String>,
+        /// Full paths instead of file names.
+        #[arg(long, conflicts_with = "json")]
+        paths: bool,
+        /// JSON output (name, path).
+        #[arg(long)]
+        json: bool,
+        /// Read the words as regular expressions.
+        #[arg(long)]
+        regex: bool,
+        /// Walk the subfolders of the sources even when `recursive` is off.
+        #[arg(long)]
+        deep: bool,
+    },
+    /// Show or change the configuration
+    ///
+    /// The configuration lives in ~/.config/wally/config.yaml:
+    ///
+    ///   sources     folders the images come from (`settings source add|remove`)
+    ///   recursive   walk their subfolders too: true or false
+    ///   interval    how long an image stays: 30m, 1h, 1h 30m… (10s at least)
+    ///   order       random (each image once before any twice) or sequential
+    ///   screens     distinct (an image per screen) or same
+    ///
+    /// The daemon follows every change, no restart needed.
+    #[command(verbatim_doc_comment, about = "Show or change the configuration")]
+    Settings {
+        #[command(subcommand)]
+        action: Option<Settings>,
+    },
+    /// Install, start or stop the daemon that changes the wallpapers.
+    Daemon {
+        #[command(subcommand)]
+        action: Daemon,
+    },
+    /// Print the banner on standard output.
+    #[command(hide = true)]
+    Banner,
+}
+
+#[derive(Subcommand)]
+enum Settings {
+    /// Print the configuration (the default).
+    Show,
+    /// Print the path of the configuration file.
+    Path,
+    /// Open the configuration in $EDITOR, and check it once saved.
+    Edit,
+    /// Print one setting.
+    Get {
+        /// interval, order, screens or recursive.
+        key: Key,
+    },
+    /// Change one setting.
+    Set {
+        /// interval, order, screens or recursive.
+        key: Key,
+        /// The new value.
+        value: String,
+    },
+    /// Add or remove a source folder.
+    Source {
+        #[command(subcommand)]
+        action: Source,
+    },
+}
+
+#[derive(Subcommand)]
+enum Source {
+    /// Add a folder of images.
+    Add {
+        /// The folder.
+        folder: String,
+    },
+    /// Remove a folder.
+    Remove {
+        /// The folder.
+        folder: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum Daemon {
+    /// Start the daemon at login, and now.
+    Install,
+    /// Stop the daemon and stop starting it at login.
+    Uninstall,
+    /// Start the daemon.
+    Start,
+    /// Stop the daemon until the next start or login.
+    Stop,
+    /// Restart the daemon.
+    Restart,
+    /// Run the daemon in this terminal (launchd does it for you).
+    Run,
+}
+
+/// Whether the command line asks for help, so that the banner goes first.
+fn asks_for_help(args: &[String]) -> bool {
+    args.len() <= 1
+        || args.get(1).is_some_and(|a| a == "help")
+        || args.iter().any(|a| a == "-h" || a == "--help")
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().collect();
+    if asks_for_help(&args) && !args.iter().any(|a| a == "--no-banner") {
+        banner::print();
+    }
+    let cli = Cli::parse();
+    match run(cli) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("wally: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Runs the command, returning the exit code.
+fn run(cli: Cli) -> Result<ExitCode> {
+    let Some(command) = cli.command else {
+        Cli::command().print_help()?;
+        return Ok(ExitCode::SUCCESS);
+    };
+    match command {
+        Command::Status { json } => status(json),
+        Command::Show { paths, json } => show(paths, json),
+        Command::Next { screen, quiet } => next(screen.as_deref(), quiet),
+        Command::Search {
+            words,
+            paths,
+            json,
+            regex,
+            deep,
+        } => search(&words, paths, json, regex, deep),
+        Command::Settings { action } => settings(action.unwrap_or(Settings::Show)),
+        Command::Daemon { action } => daemon_command(action),
+        Command::Banner => {
+            print!("{}", banner::render(banner::Palette::from_env()));
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// The file name of `path`, or the whole path when asked or when it has none.
+fn label(path: &Path, full: bool) -> String {
+    match path.file_name() {
+        Some(name) if !full => name.to_string_lossy().into_owned(),
+        _ => path.display().to_string(),
+    }
+}
+
+/// `duration` rounded to the minute past an hour, to the second below.
+fn rough(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    let secs = if secs >= 3600 { secs / 60 * 60 } else { secs };
+    humantime::format_duration(Duration::from_secs(secs)).to_string()
+}
+
+/// `wally status`.
+fn status(json: bool) -> Result<ExitCode> {
+    let config = Config::load_or_init()?;
+    let state = State::load(&paths::state_file());
+    let images = library::scan(&config.source_paths(), config.recursive);
+    let pid = daemon::running_pid();
+    let installed = launchd::installed();
+    let next = daemon::next_change(&state, &config);
+    let screens = desktop::screens().unwrap_or_default();
+    if json {
+        let value = json!({
+            "daemon": { "installed": installed, "running": pid.is_some(), "pid": pid },
+            "config": paths::config_file(),
+            "sources": config.source_paths(),
+            "images": images.len(),
+            "interval": config.interval,
+            "order": config.order.to_string(),
+            "screens": config.screens.to_string(),
+            "last_change": state.last_change.map(humantime::format_rfc3339_seconds).map(|t| t.to_string()),
+            "next_change": next.filter(|_| pid.is_some()).map(humantime::format_rfc3339_seconds).map(|t| t.to_string()),
+            "displays": screens.len(),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let daemon = match (pid, installed) {
+        (Some(pid), true) => format!("running (pid {pid}), starts at login"),
+        (Some(pid), false) => format!("running (pid {pid}), not started at login"),
+        (None, true) => "stopped — `wally daemon start`".into(),
+        (None, false) => "not installed — `wally daemon install`".into(),
+    };
+    let now = SystemTime::now();
+    let row = |key: &str, value: &str| println!("{key:<10} {value}");
+    row("daemon", &daemon);
+    row("config", &paths::tilde(&paths::config_file()));
+    for (i, source) in config.source_paths().iter().enumerate() {
+        let missing = if source.is_dir() { "" } else { "  (missing)" };
+        row(
+            if i == 0 { "sources" } else { "" },
+            &format!("{}{missing}", paths::tilde(source)),
+        );
+    }
+    row("images", &images.len().to_string());
+    row(
+        "rotation",
+        &format!(
+            "every {}, {}, {} per screen",
+            config.interval, config.order, config.screens
+        )
+        .replace("same per screen", "same on every screen"),
+    );
+    if let Some(last) = state.last_change {
+        row(
+            "changed",
+            &format!(
+                "{} ago",
+                rough(now.duration_since(last).unwrap_or_default())
+            ),
+        );
+    }
+    match (next, pid) {
+        (Some(next), Some(_)) => {
+            let wait = next.duration_since(now).unwrap_or_default();
+            row(
+                "next",
+                &if wait.is_zero() {
+                    "now".into()
+                } else {
+                    format!("in {}", rough(wait))
+                },
+            );
+        }
+        (None, Some(_)) => row("next", "now"),
+        _ => {}
+    }
+    row("screens", &screens.len().to_string());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `wally show`.
+fn show(full: bool, json: bool) -> Result<ExitCode> {
+    let screens = desktop::screens()?;
+    if json {
+        let value: Vec<_> = screens
+            .iter()
+            .enumerate()
+            .map(|(i, s)| json!({ "screen": i + 1, "id": s.id, "name": s.name, "path": s.wallpaper }))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let width = screens
+        .iter()
+        .map(|s| s.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (i, s) in screens.iter().enumerate() {
+        let image = match s.wallpaper.as_deref() {
+            Some(p) if p.is_dir() => {
+                format!("{}/  (a folder macOS rotates itself)", label(p, full))
+            }
+            Some(p) => label(p, full),
+            None => "?".into(),
+        };
+        println!("{}  {:<width$}  {image}", i + 1, s.name);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The display id of the screen `which` names: its number in `wally show`,
+/// or part of its name.
+fn pick_screen(screens: &[Screen], which: &str) -> Result<u32> {
+    if let Ok(n) = which.parse::<usize>() {
+        return screens
+            .get(n.wrapping_sub(1))
+            .map(|s| s.id)
+            .with_context(|| format!("no screen {n}: there are {}", screens.len()));
+    }
+    let needle = which.to_lowercase();
+    let found: Vec<&Screen> = screens
+        .iter()
+        .filter(|s| s.name.to_lowercase().contains(&needle))
+        .collect();
+    match found.as_slice() {
+        [one] => Ok(one.id),
+        [] => bail!("no screen named like `{which}`"),
+        _ => bail!("several screens are named like `{which}`: use their number"),
+    }
+}
+
+/// `wally next`.
+fn next(screen: Option<&str>, quiet: bool) -> Result<ExitCode> {
+    let config = Config::load_or_init()?;
+    let targets = match screen {
+        Some(which) => Targets::Only(vec![pick_screen(&desktop::screens()?, which)?]),
+        None => Targets::All,
+    };
+    let changes = engine::change(&config, &targets)?;
+    if !quiet {
+        for c in changes {
+            println!("{}  {}", c.screen.name, label(&c.image, false));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `wally search`.
+fn search(words: &[String], full: bool, json: bool, regex: bool, deep: bool) -> Result<ExitCode> {
+    let config = Config::load_or_init()?;
+    let images = library::scan(&config.source_paths(), config.recursive || deep);
+    let found = library::search(&images, words, regex)?;
+    if json {
+        let value: Vec<_> = found
+            .iter()
+            .map(|p| json!({ "name": label(p, false), "path": p }))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        let mut out = io::stdout().lock();
+        for path in &found {
+            writeln!(out, "{}", label(path, full))?;
+        }
+    }
+    Ok(if found.is_empty() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// `wally settings`.
+fn settings(action: Settings) -> Result<ExitCode> {
+    let path = paths::config_file();
+    let mut config = Config::load_or_init()?;
+    match action {
+        Settings::Show => {
+            let text = std::fs::read_to_string(&path)?;
+            if io::stdout().is_terminal() {
+                println!("# {}\n", paths::tilde(&path));
+            }
+            print!("{text}");
+        }
+        Settings::Path => println!("{}", path.display()),
+        Settings::Get { key } => println!("{}", config.get(key)),
+        Settings::Set { key, value } => {
+            config.set(key, &value)?;
+            config.write(&path)?;
+            println!("{key}: {}", config.get(key));
+        }
+        Settings::Source { action } => {
+            match action {
+                Source::Add { folder } => config.add_source(&folder)?,
+                Source::Remove { folder } => config.remove_source(&folder)?,
+            }
+            config.write(&path)?;
+            for source in &config.sources {
+                println!("{source}");
+            }
+        }
+        Settings::Edit => edit(&path)?,
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Opens the configuration in `$VISUAL` or `$EDITOR` on a copy, and puts the
+/// copy in place only once it reads as a valid configuration.
+fn edit(path: &Path) -> Result<()> {
+    let editor = env::var("VISUAL")
+        .or_else(|_| env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
+    let draft: PathBuf = path.with_extension("draft.yaml");
+    std::fs::copy(path, &draft)?;
+    loop {
+        let status = Process::new("sh")
+            .arg("-c")
+            .arg(format!("{editor} \"$1\""))
+            .arg("sh")
+            .arg(&draft)
+            .status()
+            .with_context(|| format!("cannot run {editor}"))?;
+        if !status.success() {
+            std::fs::remove_file(&draft)?;
+            bail!("{editor} failed, the configuration is unchanged");
+        }
+        match Config::read(&draft) {
+            Ok(_) => {
+                std::fs::rename(&draft, path)?;
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("wally: {e:#}");
+                eprint!("Edit again? [Y/n] ");
+                let mut answer = String::new();
+                io::stdin().read_line(&mut answer)?;
+                if answer.trim().eq_ignore_ascii_case("n") {
+                    std::fs::remove_file(&draft)?;
+                    bail!("the configuration is unchanged");
+                }
+            }
+        }
+    }
+}
+
+/// `wally daemon`.
+fn daemon_command(action: Daemon) -> Result<ExitCode> {
+    match action {
+        Daemon::Run => daemon::run()?,
+        Daemon::Install => {
+            let program = env::current_exe()?.canonicalize()?;
+            launchd::install(&program)?;
+            println!(
+                "daemon installed: it starts at login, log in {}",
+                paths::tilde(&launchd::log_path())
+            );
+        }
+        Daemon::Uninstall => {
+            launchd::uninstall()?;
+            println!("daemon uninstalled");
+        }
+        Daemon::Start => {
+            launchd::start()?;
+            println!("daemon started");
+        }
+        Daemon::Stop => {
+            launchd::stop()?;
+            println!("daemon stopped");
+        }
+        Daemon::Restart => {
+            launchd::restart()?;
+            println!("daemon restarted");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
