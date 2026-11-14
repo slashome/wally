@@ -59,6 +59,7 @@ enum Command {
     ///
     /// Read from macOS itself, so it is exact even when the image was not put
     /// there by wally.
+    #[command(visible_alias = "current")]
     Show {
         /// Full paths instead of file names.
         #[arg(long, conflicts_with = "json")]
@@ -68,6 +69,7 @@ enum Command {
         json: bool,
     },
     /// Change the wallpapers now, and restart the interval.
+    #[command(visible_alias = "change")]
     Next {
         /// Only this screen: its number in `wally show`, or part of its name.
         #[arg(long, short)]
