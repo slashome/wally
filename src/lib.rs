@@ -2,3 +2,5 @@
 //! you drive it on the command line.
 
 pub mod banner;
+pub mod config;
+pub mod paths;
