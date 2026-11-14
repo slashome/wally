@@ -2,7 +2,7 @@
 //! screens, for `wally next` and the daemon alike.
 
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Result, bail};
 
@@ -11,6 +11,12 @@ use crate::desktop::{self, Screen};
 use crate::library;
 use crate::paths;
 use crate::rotation::State;
+
+/// How long a change waits for macOS to report the new images.
+const SETTLE: Duration = Duration::from_secs(5);
+
+/// How often a change asks macOS whether the new images are in place.
+const SETTLE_POLL: Duration = Duration::from_millis(100);
 
 /// Which screens a change touches.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +92,7 @@ pub fn change(config: &Config, targets: &Targets) -> Result<Vec<Change>> {
             image,
         });
     }
+    settle(&changes);
     let present: Vec<u32> = screens.iter().map(|s| s.id).collect();
     state.shown.retain(|id, _| present.contains(id));
     if *targets != Targets::Undressed {
@@ -93,4 +100,26 @@ pub fn change(config: &Config, targets: &Targets) -> Result<Vec<Change>> {
     }
     state.save(&state_path)?;
     Ok(changes)
+}
+
+/// Waits until macOS reports the image of every change, for [`SETTLE`] at
+/// most: right after a change it still reports its default desktop picture
+/// for a moment, and a `wally show` run then would say so.
+fn settle(changes: &[Change]) {
+    let started = Instant::now();
+    while started.elapsed() < SETTLE {
+        let Ok(screens) = desktop::screens() else {
+            return;
+        };
+        let settled = changes.iter().all(|c| {
+            screens
+                .iter()
+                .find(|s| s.id == c.screen.id)
+                .is_none_or(|s| s.wallpaper.as_ref() == Some(&c.image))
+        });
+        if settled {
+            return;
+        }
+        desktop::pump(SETTLE_POLL);
+    }
 }
