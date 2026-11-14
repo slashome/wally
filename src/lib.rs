@@ -3,7 +3,10 @@
 
 pub mod banner;
 pub mod config;
+pub mod daemon;
 pub mod desktop;
+pub mod engine;
+pub mod launchd;
 pub mod library;
 pub mod paths;
 pub mod rotation;
