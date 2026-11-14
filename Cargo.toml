@@ -1,0 +1,43 @@
+[package]
+name = "wally"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Rotates your wallpapers, screen by screen, from a small daemon you drive on the command line."
+license = "MIT"
+authors = ["slashome"]
+repository = "https://github.com/slashome/wally"
+readme = "README.md"
+keywords = ["wallpaper", "macos", "daemon", "cli", "launchd"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "wally"
+path = "src/main.rs"
+
+[lib]
+name = "wally"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+fastrand = "2.5.0"
+humantime = "2.4.0"
+regex = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde-saphyr = "2.1.1"
+serde_json = "1.0.154"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
