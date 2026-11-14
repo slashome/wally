@@ -3,4 +3,7 @@
 
 pub mod banner;
 pub mod config;
+pub mod desktop;
+pub mod library;
 pub mod paths;
+pub mod rotation;
