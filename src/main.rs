@@ -28,6 +28,7 @@ Environment
   NO_COLOR          no colour
 
 Examples
+  wally init                     set wally up, questions adapted to this Mac
   wally settings source add ~/Pictures/Wallpapers
   wally settings set interval 15m
   wally daemon install           start at login, change every interval
@@ -49,6 +50,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Set wally up: looks at this Mac, then asks what it cannot guess.
+    ///
+    /// Detects the screens, what they show (a folder macOS rotates, or an
+    /// image and its folder), the folders of wallpapers around, and the
+    /// configuration and daemon already there. Then it asks for the source
+    /// folders, the interval, the order — and, only where it matters, the
+    /// subfolders, one image per screen, and starting at login. An existing
+    /// configuration gives the default answers.
+    Init {
+        /// Keep every default answer, ask nothing.
+        #[arg(long, short)]
+        yes: bool,
+        /// Source folder, instead of asking (repeatable).
+        #[arg(long = "source", value_name = "FOLDER")]
+        sources: Vec<String>,
+        /// Do not install the daemon.
+        #[arg(long)]
+        no_daemon: bool,
+    },
     /// Whether the daemon runs, where images come from, when they change next.
     Status {
         /// JSON output.
@@ -210,6 +230,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     };
     match command {
+        Command::Init {
+            yes,
+            sources,
+            no_daemon,
+        } => init(yes, sources, no_daemon),
         Command::Status { json } => status(json),
         Command::Show { paths, json } => show(paths, json),
         Command::Next { screen, quiet } => next(screen.as_deref(), quiet),
@@ -242,6 +267,36 @@ fn rough(duration: Duration) -> String {
     let secs = duration.as_secs();
     let secs = if secs >= 3600 { secs / 60 * 60 } else { secs };
     humantime::format_duration(Duration::from_secs(secs)).to_string()
+}
+
+/// `wally init`.
+fn init(yes: bool, sources: Vec<String>, no_daemon: bool) -> Result<ExitCode> {
+    let system = wally::init::detect();
+    if !cfg!(target_os = "macos") {
+        bail!(
+            "wally only drives wallpapers on macOS for now ({})",
+            system.os
+        );
+    }
+    let assume = yes || !io::stdin().is_terminal();
+    let options = wally::init::Options { sources, no_daemon };
+    let mut prompt = wally::init::Prompt::new(io::stdin().lock(), io::stdout(), assume);
+    let answers = wally::init::questionnaire(&mut prompt, &system, &options)?;
+    let path = paths::config_file();
+    answers.config.write(&path)?;
+    println!("\nWrote {}", paths::tilde(&path));
+    if answers.install_daemon {
+        launchd::install(&env::current_exe()?.canonicalize()?)?;
+        println!(
+            "Daemon installed: it starts at login, log in {}",
+            paths::tilde(&launchd::log_path())
+        );
+    } else if system.daemon_installed {
+        println!("The daemon picks the new configuration up by itself.");
+    } else {
+        println!("Start the daemon later with `wally daemon install`.");
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `wally status`.

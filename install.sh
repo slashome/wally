@@ -45,31 +45,14 @@ build() {
   cp "$work/cargo/bin/wally" "$work/wally"
 }
 
-ask_source() {
-  if [ -n "${WALLY_SOURCE:-}" ]; then
-    printf '%s' "$WALLY_SOURCE"
-    return
-  fi
-  default="$HOME/Pictures/Wallpapers"
-  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-    printf '%sFolder of wallpapers%s [%s]: ' "$BOLD" "$RESET" "$default" > /dev/tty
-    read -r answer < /dev/tty || answer=""
-    printf '%s' "${answer:-$default}"
-  else
-    printf '%s' "$default"
-  fi
-}
-
 configure() {
-  source_dir=$(ask_source)
-  case "$source_dir" in "~"*) source_dir="$HOME${source_dir#\~}" ;; esac
-  "$BIN" settings path >/dev/null
-  if [ -d "$source_dir" ]; then
-    "$BIN" settings source add "$source_dir" >/dev/null 2>&1 || true
-    "$BIN" settings source remove "$HOME/Pictures/Wallpapers" >/dev/null 2>&1 || true
+  set --
+  [ -n "${WALLY_SOURCE:-}" ] && set -- "$@" --source "$WALLY_SOURCE"
+  [ -n "${WALLY_NO_DAEMON:-}" ] && set -- "$@" --no-daemon
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    "$BIN" init "$@" < /dev/tty > /dev/tty
   else
-    printf '%s%s does not exist yet: add it later with `wally settings source add <folder>`.%s\n' \
-      "$RUST" "$source_dir" "$RESET"
+    "$BIN" init --yes "$@"
   fi
 }
 
@@ -88,16 +71,9 @@ main() {
   install -m 755 "$work/wally" "$BIN"
   xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true
 
-  configure
-  if [ -z "${WALLY_NO_DAEMON:-}" ]; then
-    "$BIN" daemon install >/dev/null
-    daemon_note="The daemon is running and starts at login."
-  else
-    daemon_note="Start the daemon with: wally daemon install"
-  fi
-
   "$BIN" banner
-  printf '%s%s is now installed.%s %s\n\n' "$BOLD" "$("$BIN" --version)" "$RESET" "$daemon_note"
+  configure
+  printf '\n%s%s is now installed.%s\n\n' "$BOLD" "$("$BIN" --version)" "$RESET"
   case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
     *) printf '%sAdd %s to your PATH:%s\n  export PATH="%s:$PATH"\n\n' "$RUST" "$INSTALL_DIR" "$RESET" "$INSTALL_DIR" ;;

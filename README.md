@@ -10,24 +10,25 @@ macOS only for now. A menu bar app comes next.
 curl -fsSL https://raw.githubusercontent.com/slashome/wally/main/install.sh | sh
 ```
 
-The script downloads the latest release (or builds it with `cargo` when there is none), installs `wally` in `~/.local/bin`, asks for your folder of wallpapers and starts the daemon at login.
+The script downloads the latest release (or builds it with `cargo` when there is none), installs `wally` in `~/.local/bin` and runs `wally init`.
 
 | Variable | Effect |
 |---|---|
 | `WALLY_INSTALL_DIR` | where to install the binary, `~/.local/bin` by default |
-| `WALLY_SOURCE` | the folder of wallpapers, instead of asking |
+| `WALLY_SOURCE` | the folder of wallpapers, instead of asking (`wally init --source`) |
 | `WALLY_VERSION` | a release tag, instead of the latest |
 | `WALLY_NO_DAEMON=1` | install the binary only |
 
-From source: `cargo install --git https://github.com/slashome/wally`, then `wally daemon install`.
+From source: `cargo install --git https://github.com/slashome/wally`, then `wally init`.
 
 ## Commands
 
 | Command | |
 |---|---|
+| `wally init` | set wally up: it looks at this Mac first, then asks only what it cannot guess (`--yes`, `--source`, `--no-daemon`) |
 | `wally status` | whether the daemon runs, the sources and their image count, when the next change comes |
-| `wally show` | which image is on which screen, left to right (`--paths`, `--json`) |
-| `wally next` | change now, every screen or one (`--screen 2`, `--screen dell`) |
+| `wally show` | which image is on which screen, left to right (`--paths`, `--json`); alias `current` |
+| `wally next` | change now, every screen or one (`--screen 2`, `--screen dell`); alias `change` |
 | `wally search <words>` | images whose file name contains every word (`--paths`, `--json`, `--regex`, `--deep`) |
 | `wally settings` | print the configuration; `get`, `set`, `edit`, `path`, `source add\|remove` |
 | `wally daemon` | `install`, `uninstall`, `start`, `stop`, `restart` |
@@ -38,6 +39,29 @@ $ wally show
 1  DELL U2723QE             arne-forest.jpg
 2  Built-in Retina Display  dune-night.webp
 ```
+
+## Setting up
+
+```console
+$ wally init
+Detected
+  system     macOS 26.4.1, aarch64
+  screens    1: Built-in Retina Display
+  wallpaper  ~/Pictures/Wallpapers/arne-forest.jpg
+  config     none yet
+  daemon     not installed
+
+Where are your wallpapers?
+  1) ~/Pictures/Wallpapers  412 images (+32 in subfolders), holds the image on screen
+  0) another folder
+Folders, by number [1]:
+Include the 32 images of their subfolders? [y/N]:
+Change every [30m]: 15m
+Order: random or sequential [random]:
+Change them on schedule, starting at login? [Y/n]:
+```
+
+It offers the folders it finds — the one a screen shows, the one macOS rotates, those named like wallpapers in Pictures, Documents and iCloud Drive — and asks about subfolders, one image per screen or starting at login only when it matters. Run it again to review everything: the current configuration gives the defaults.
 
 ## Configuration
 
