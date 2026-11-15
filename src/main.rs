@@ -124,9 +124,10 @@ enum Command {
     ///
     ///   sources     folders the images come from (`settings source add|remove`)
     ///   recursive   walk their subfolders too: true or false
-    ///   interval    how long an image stays: 30m, 1h, 1h 30m… (10s at least)
-    ///   order       random (each image once before any twice) or sequential
-    ///   screens     distinct (an image per screen) or same
+    ///   interval    how long an image stays: 45s, 15m, 2h, 1h 30m; a bare number
+    ///               counts minutes (10s at least)
+    ///   order       r or random (each image once before any twice), s or sequential
+    ///   screens     d or distinct (an image per screen), s or same
     ///
     /// The daemon follows every change, no restart needed.
     #[command(verbatim_doc_comment, about = "Show or change the configuration")]

@@ -118,10 +118,22 @@ impl fmt::Display for Key {
     }
 }
 
-/// `interval` read as a duration, refused below [`MIN_INTERVAL`].
+/// `text` as an interval is written: a bare number counts minutes.
+pub fn normalize_interval(text: &str) -> String {
+    let text = text.trim();
+    if !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()) {
+        format!("{text}m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// `interval` read as a duration, refused below [`MIN_INTERVAL`]. Units are
+/// `s`, `m`, `h` and `d`; a bare number counts minutes.
 pub fn parse_interval(text: &str) -> Result<Duration> {
-    let interval = humantime::parse_duration(text)
-        .with_context(|| format!("`{text}` is not a duration (try 30m, 1h, 1h 30m)"))?;
+    let interval = humantime::parse_duration(&normalize_interval(text)).with_context(|| {
+        format!("`{text}` is not a duration: use s, m, h or d, such as 45s, 15m, 2h or 1h 30m")
+    })?;
     if interval < MIN_INTERVAL {
         bail!(
             "interval `{text}` is too short: at least {}",
@@ -205,7 +217,7 @@ impl Config {
         match key {
             Key::Interval => {
                 parse_interval(value)?;
-                self.interval = value.to_string();
+                self.interval = normalize_interval(value);
             }
             Key::Order => self.order = value.parse()?,
             Key::Screens => self.screens = value.parse()?,
@@ -259,8 +271,8 @@ impl FromStr for Order {
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
-            "random" => Ok(Order::Random),
-            "sequential" => Ok(Order::Sequential),
+            "random" | "r" => Ok(Order::Random),
+            "sequential" | "s" => Ok(Order::Sequential),
             _ => bail!("`{s}` is not an order: random or sequential"),
         }
     }
@@ -280,8 +292,8 @@ impl FromStr for Spread {
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
-            "distinct" => Ok(Spread::Distinct),
-            "same" => Ok(Spread::Same),
+            "distinct" | "d" => Ok(Spread::Distinct),
+            "same" | "s" => Ok(Spread::Same),
             _ => bail!("`{s}` is not a screen mode: distinct or same"),
         }
     }
@@ -343,6 +355,24 @@ mod tests {
         config.set(Key::Interval, "2h").unwrap();
         config.write(&path).unwrap();
         assert_eq!(Config::read(&path).unwrap(), config);
+    }
+
+    #[test]
+    fn a_bare_number_counts_minutes() {
+        assert_eq!(normalize_interval("5"), "5m");
+        assert_eq!(normalize_interval(" 1h 30m "), "1h 30m");
+        assert_eq!(parse_interval("5").unwrap(), Duration::from_secs(300));
+        let mut config = Config::default();
+        config.set(Key::Interval, "20").unwrap();
+        assert_eq!(config.interval, "20m");
+    }
+
+    #[test]
+    fn order_and_screens_take_their_initial() {
+        assert_eq!("r".parse::<Order>().unwrap(), Order::Random);
+        assert_eq!("s".parse::<Order>().unwrap(), Order::Sequential);
+        assert_eq!("d".parse::<Spread>().unwrap(), Spread::Distinct);
+        assert_eq!("s".parse::<Spread>().unwrap(), Spread::Same);
     }
 
     #[test]

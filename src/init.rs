@@ -10,7 +10,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::config::{Config, Order, Spread, parse_interval};
+use crate::config::{Config, Order, Spread, normalize_interval, parse_interval};
 use crate::desktop::{self, Screen};
 use crate::{daemon, launchd, library, paths};
 
@@ -402,17 +402,19 @@ pub fn questionnaire<R: BufRead, W: Write>(
     } else {
         base.recursive
     };
-    let interval = prompt.ask("Change every", &base.interval, |a| {
-        parse_interval(a).map(|_| a.to_string())
-    })?;
+    let interval = prompt.ask(
+        "Change every — 45s, 15m, 2h, 1h 30m",
+        &base.interval,
+        |a| parse_interval(a).map(|_| normalize_interval(a)),
+    )?;
     let order: Order = prompt.ask(
-        "Order: random or sequential",
+        "Order: (r)andom or (s)equential",
         &base.order.to_string(),
         |a| a.parse(),
     )?;
     let screens: Spread = if system.screens.len() > 1 {
         prompt.ask(
-            "Screens: distinct images or the same on all",
+            "Screens: (d)istinct images or the (s)ame on all",
             &base.screens.to_string(),
             |a| a.parse(),
         )?
@@ -505,7 +507,7 @@ mod tests {
             reason: Reason::NamedLikeWallpapers,
         };
         let (answers, out) = run(
-            "1\n15m\nsequential\nn\n",
+            "1\n15\ns\nn\n",
             &system(vec![candidate.clone()], 1),
             &Options::default(),
         );
