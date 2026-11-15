@@ -70,9 +70,19 @@ fn modified(path: &PathBuf) -> Option<SystemTime> {
     fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// When the next scheduled change is due, given the last one.
+/// When the next scheduled change is due, given the last one; none while
+/// paused.
 pub fn next_change(state: &State, config: &Config) -> Option<SystemTime> {
+    if state.paused {
+        return None;
+    }
     state.last_change.map(|t| t + config.interval())
+}
+
+/// Whether a scheduled change is due at `now`: never while paused, at once
+/// when nothing changed yet.
+pub fn due(state: &State, config: &Config, now: SystemTime) -> bool {
+    !state.paused && next_change(state, config).is_none_or(|t| now >= t)
 }
 
 /// Runs the daemon until it is killed.
@@ -98,7 +108,7 @@ pub fn run() -> Result<()> {
             }
         }
         let state = State::load(&paths::state_file());
-        let due = next_change(&state, &config).is_none_or(|t| SystemTime::now() >= t);
+        let due = due(&state, &config, SystemTime::now());
         let targets = if due {
             Targets::All
         } else {
@@ -126,5 +136,34 @@ pub fn run() -> Result<()> {
             }
         }
         desktop::pump(TICK);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_change_is_due_once_the_interval_is_over() {
+        let config = Config::default();
+        let now = SystemTime::now();
+        let mut state = State::default();
+        assert!(due(&state, &config, now));
+        state.last_change = Some(now);
+        assert!(!due(&state, &config, now + Duration::from_secs(60)));
+        assert!(due(&state, &config, now + config.interval()));
+    }
+
+    #[test]
+    fn nothing_is_due_while_paused() {
+        let config = Config::default();
+        let now = SystemTime::now();
+        let mut state = State::default();
+        state.pause();
+        assert!(!due(&state, &config, now + Duration::from_secs(86_400)));
+        assert_eq!(next_change(&state, &config), None);
+        state.resume(now);
+        assert_eq!(next_change(&state, &config), Some(now + config.interval()));
+        assert!(!due(&state, &config, now));
     }
 }

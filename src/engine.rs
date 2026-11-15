@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::config::{Config, Spread};
 use crate::desktop::{self, Screen};
+use crate::history;
 use crate::library;
 use crate::marks::{Mark, Marks};
 use crate::paths;
@@ -111,8 +112,50 @@ pub fn change(config: &Config, targets: &Targets) -> Result<Vec<Change>> {
         state.last_change = Some(SystemTime::now());
     }
     state.save(&state_path)?;
+    history::record(&paths::history_file(), &changes)?;
     settle(&changes);
     Ok(changes)
+}
+
+/// Puts `image` on the screen with display id `screen`, and restarts the
+/// interval as a change does.
+pub fn set(screen: u32, image: &Path) -> Result<Change> {
+    if !image.is_absolute() {
+        bail!("{} is not an absolute path", image.display());
+    }
+    if !image.is_file() || !library::is_image(image) {
+        bail!("{} is not an image", image.display());
+    }
+    let screen = self::screen(screen)?;
+    desktop::set_wallpaper(screen.id, image)?;
+    let state_path = paths::state_file();
+    let mut state = State::load(&state_path);
+    state.shown.insert(screen.id, image.to_path_buf());
+    state.last_change = Some(SystemTime::now());
+    state.save(&state_path)?;
+    let change = Change {
+        screen,
+        image: image.to_path_buf(),
+    };
+    history::record(&paths::history_file(), std::slice::from_ref(&change))?;
+    settle(std::slice::from_ref(&change));
+    Ok(change)
+}
+
+/// Pauses the scheduled changes, in the state file.
+pub fn pause() -> Result<()> {
+    let path = paths::state_file();
+    let mut state = State::load(&path);
+    state.pause();
+    state.save(&path)
+}
+
+/// Resumes the scheduled changes, the interval counted from now.
+pub fn resume() -> Result<()> {
+    let path = paths::state_file();
+    let mut state = State::load(&path);
+    state.resume(SystemTime::now());
+    state.save(&path)
 }
 
 /// The images of the sources, banned ones left out; `deep` walks the

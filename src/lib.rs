@@ -6,6 +6,7 @@ pub mod config;
 pub mod daemon;
 pub mod desktop;
 pub mod engine;
+pub mod history;
 pub mod init;
 pub mod launchd;
 pub mod library;

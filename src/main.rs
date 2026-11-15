@@ -13,7 +13,7 @@ use serde_json::json;
 use wally::config::{Config, Key};
 use wally::desktop::{self, Screen};
 use wally::engine::{self, Targets};
-use wally::marks::Mark;
+use wally::marks::{Mark, Marks};
 use wally::rotation::State;
 use wally::{banner, daemon, launchd, library, paths};
 
@@ -100,6 +100,33 @@ enum Command {
         /// Say nothing.
         #[arg(long, short)]
         quiet: bool,
+    },
+    /// Put an image on a screen now, and restart the interval.
+    Set {
+        /// The image.
+        image: PathBuf,
+        /// The screen: its number in `wally show`, or part of its name; the
+        /// first one by default.
+        #[arg(long, short)]
+        screen: Option<String>,
+    },
+    /// Stop changing the wallpapers on schedule, until `wally resume`.
+    ///
+    /// The Spaces still follow, and `wally next` still changes.
+    Pause,
+    /// Change the wallpapers on schedule again, the interval counted from now.
+    Resume,
+    /// The images shown lately, newest first.
+    History {
+        /// How many entries.
+        #[arg(long, short, default_value_t = 20)]
+        limit: usize,
+        /// Full paths instead of file names.
+        #[arg(long, conflicts_with = "json")]
+        paths: bool,
+        /// JSON output (at, screen_id, screen_name, image).
+        #[arg(long)]
+        json: bool,
     },
     /// Mark an image as a favorite: it comes three times as often.
     ///
@@ -271,6 +298,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Status { json } => status(json),
         Command::Show { paths, json } => show(paths, json),
         Command::Next { screen, quiet } => next(screen.as_deref(), quiet),
+        Command::Set { image, screen } => set(&image, screen.as_deref()),
+        Command::Pause => pause(),
+        Command::Resume => resume(),
+        Command::History { limit, paths, json } => history(limit, paths, json),
         Command::Favorite { image, screen, off } => {
             mark(Mark::Favorite, image.as_deref(), screen.as_deref(), off)
         }
@@ -342,7 +373,8 @@ fn init(yes: bool, sources: Vec<String>, no_daemon: bool) -> Result<ExitCode> {
 fn status(json: bool) -> Result<ExitCode> {
     let config = Config::load_or_init()?;
     let state = State::load(&paths::state_file());
-    let images = library::scan(&config.source_paths(), config.recursive);
+    let images = engine::library(&config, false);
+    let marks = Marks::load(&paths::marks_file());
     let pid = daemon::running_pid();
     let installed = launchd::installed();
     let next = daemon::next_change(&state, &config);
@@ -353,6 +385,9 @@ fn status(json: bool) -> Result<ExitCode> {
             "config": paths::config_file(),
             "sources": config.source_paths(),
             "images": images.len(),
+            "paused": state.paused,
+            "favorites": marks.favorites.len(),
+            "banned": marks.banned.len(),
             "interval": config.interval,
             "order": config.order.to_string(),
             "screens": config.screens.to_string(),
@@ -380,7 +415,16 @@ fn status(json: bool) -> Result<ExitCode> {
             &format!("{}{missing}", paths::tilde(source)),
         );
     }
-    row("images", &images.len().to_string());
+    row(
+        "images",
+        &format!(
+            "{}, {} favorite{}, {} banned",
+            images.len(),
+            marks.favorites.len(),
+            if marks.favorites.len() == 1 { "" } else { "s" },
+            marks.banned.len()
+        ),
+    );
     row(
         "rotation",
         &format!(
@@ -399,6 +443,7 @@ fn status(json: bool) -> Result<ExitCode> {
         );
     }
     match (next, pid) {
+        _ if state.paused => row("next", "paused — `wally resume`"),
         (Some(next), Some(_)) => {
             let wait = next.duration_since(now).unwrap_or_default();
             row(
@@ -486,6 +531,67 @@ fn next(screen: Option<&str>, quiet: bool) -> Result<ExitCode> {
                  (`wally daemon install`) so the other Spaces follow"
             );
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The display id of the screen `which` names, or of the first screen.
+fn screen_or_first(which: Option<&str>) -> Result<u32> {
+    let screens = desktop::screens()?;
+    match which {
+        Some(which) => pick_screen(&screens, which),
+        None => screens
+            .first()
+            .map(|s| s.id)
+            .context("no screen is connected"),
+    }
+}
+
+/// `wally set`.
+fn set(image: &Path, which: Option<&str>) -> Result<ExitCode> {
+    let image = absolute(image)?;
+    let screen = screen_or_first(which)?;
+    let change = engine::set(screen, &image)?;
+    println!("{}  {}", change.screen.name, label(&change.image, false));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `wally pause`.
+fn pause() -> Result<ExitCode> {
+    engine::pause()?;
+    println!("paused: the wallpapers stay until `wally resume`");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `wally resume`.
+fn resume() -> Result<ExitCode> {
+    engine::resume()?;
+    let config = Config::load_or_init()?;
+    println!("resumed: next change in {}", config.interval);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `wally history`.
+fn history(limit: usize, full: bool, json: bool) -> Result<ExitCode> {
+    let entries = wally::history::read(&paths::history_file(), limit);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let width = entries
+        .iter()
+        .map(|e| e.screen_name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = io::stdout().lock();
+    for e in &entries {
+        writeln!(
+            out,
+            "{}  {:<width$}  {}",
+            e.at.replace('T', " ").trim_end_matches('Z'),
+            e.screen_name,
+            label(&e.image, full)
+        )?;
     }
     Ok(ExitCode::SUCCESS)
 }
