@@ -65,6 +65,28 @@ pub fn plist(program: &Path, log: &Path) -> String {
     )
 }
 
+/// The path launchd should run for the binary at `path`: under Homebrew, the
+/// `opt` link of the formula rather than its versioned `Cellar` directory,
+/// which `brew upgrade` removes.
+pub fn homebrew_opt(path: &Path) -> Option<PathBuf> {
+    let parts: Vec<_> = path.components().collect();
+    let cellar = parts.iter().position(|c| c.as_os_str() == "Cellar")?;
+    let name = parts.get(cellar + 1)?;
+    parts.get(cellar + 2)?;
+    let mut opt: PathBuf = parts[..cellar].iter().collect();
+    opt.push("opt");
+    opt.push(name);
+    opt.extend(&parts[cellar + 3..]);
+    Some(opt)
+}
+
+/// The binary launchd should run: this one, through Homebrew's `opt` link
+/// when it is installed by Homebrew.
+pub fn program() -> Result<PathBuf> {
+    let exe = std::env::current_exe()?.canonicalize()?;
+    Ok(homebrew_opt(&exe).filter(|p| p.exists()).unwrap_or(exe))
+}
+
 /// The daemon log file.
 pub fn log_path() -> PathBuf {
     paths::log_dir().join("wally.log")
@@ -180,6 +202,16 @@ pub fn restart() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_homebrew_binary_runs_through_its_opt_link() {
+        assert_eq!(
+            homebrew_opt(Path::new("/opt/homebrew/Cellar/wally/0.0.1/bin/wally")),
+            Some(PathBuf::from("/opt/homebrew/opt/wally/bin/wally"))
+        );
+        assert_eq!(homebrew_opt(Path::new("/Users/me/.local/bin/wally")), None);
+        assert_eq!(homebrew_opt(Path::new("/usr/local/Cellar/wally")), None);
+    }
 
     #[test]
     fn the_agent_runs_the_daemon_in_the_graphical_session() {

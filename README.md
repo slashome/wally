@@ -6,6 +6,17 @@ macOS only for now. A menu bar app comes next.
 
 ## Install
 
+With Homebrew:
+
+```sh
+brew install slashome/tap/wally
+wally init
+```
+
+After `brew upgrade wally`, run `wally daemon restart` so the daemon runs the new version.
+
+Or with the install script:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/slashome/wally/main/install.sh | sh
 ```

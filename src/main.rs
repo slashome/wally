@@ -287,7 +287,7 @@ fn init(yes: bool, sources: Vec<String>, no_daemon: bool) -> Result<ExitCode> {
     answers.config.write(&path)?;
     println!("\nWrote {}", paths::tilde(&path));
     if answers.install_daemon {
-        launchd::install(&env::current_exe()?.canonicalize()?)?;
+        launchd::install(&launchd::program()?)?;
         println!(
             "Daemon installed: it starts at login, log in {}",
             paths::tilde(&launchd::log_path())
@@ -554,8 +554,7 @@ fn daemon_command(action: Daemon) -> Result<ExitCode> {
     match action {
         Daemon::Run => daemon::run()?,
         Daemon::Install => {
-            let program = env::current_exe()?.canonicalize()?;
-            launchd::install(&program)?;
+            launchd::install(&launchd::program()?)?;
             println!(
                 "daemon installed: it starts at login, log in {}",
                 paths::tilde(&launchd::log_path())
