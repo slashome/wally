@@ -10,10 +10,12 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::json;
 
+use wally::client::{self, Route};
 use wally::config::{Config, Key};
 use wally::desktop::{self, Screen};
 use wally::engine::{self, Targets};
 use wally::marks::{Mark, Marks};
+use wally::protocol::{self, Status, Target};
 use wally::rotation::State;
 use wally::{banner, daemon, launchd, library, paths};
 
@@ -513,11 +515,40 @@ fn pick_screen(screens: &[Screen], which: &str) -> Result<u32> {
     }
 }
 
+/// Whether the running daemon carries out the commands that change
+/// something.
+fn via_daemon() -> bool {
+    client::current_route() == Route::Daemon
+}
+
+/// Runs `command` on the daemon and reads the status it answers.
+fn daemon_status(command: &protocol::Command) -> Result<Status> {
+    serde_json::from_value(client::call(command)?).context("the daemon answered no status")
+}
+
 /// `wally next`.
 fn next(screen: Option<&str>, quiet: bool) -> Result<ExitCode> {
+    let screen = match screen {
+        Some(which) => Some(pick_screen(&desktop::screens()?, which)?),
+        None => None,
+    };
+    if via_daemon() {
+        let status = daemon_status(&protocol::Command::Next { screen })?;
+        if !quiet {
+            for s in status
+                .screens
+                .iter()
+                .filter(|s| screen.is_none_or(|id| id == s.id))
+            {
+                let image = s.image.as_deref().map_or("?".into(), |p| label(p, false));
+                println!("{}  {image}", s.name);
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let config = Config::load_or_init()?;
     let targets = match screen {
-        Some(which) => Targets::Only(vec![pick_screen(&desktop::screens()?, which)?]),
+        Some(id) => Targets::Only(vec![id]),
         None => Targets::All,
     };
     let changes = engine::change(&config, &targets)?;
@@ -551,6 +582,20 @@ fn screen_or_first(which: Option<&str>) -> Result<u32> {
 fn set(image: &Path, which: Option<&str>) -> Result<ExitCode> {
     let image = absolute(image)?;
     let screen = screen_or_first(which)?;
+    if via_daemon() {
+        let command = protocol::Command::Set {
+            screen,
+            image: image.display().to_string(),
+        };
+        let status = daemon_status(&command)?;
+        let name = status
+            .screens
+            .iter()
+            .find(|s| s.id == screen)
+            .map_or(String::new(), |s| s.name.clone());
+        println!("{name}  {}", label(&image, false));
+        return Ok(ExitCode::SUCCESS);
+    }
     let change = engine::set(screen, &image)?;
     println!("{}  {}", change.screen.name, label(&change.image, false));
     Ok(ExitCode::SUCCESS)
@@ -558,14 +603,22 @@ fn set(image: &Path, which: Option<&str>) -> Result<ExitCode> {
 
 /// `wally pause`.
 fn pause() -> Result<ExitCode> {
-    engine::pause()?;
+    if via_daemon() {
+        client::call(&protocol::Command::Pause)?;
+    } else {
+        engine::pause()?;
+    }
     println!("paused: the wallpapers stay until `wally resume`");
     Ok(ExitCode::SUCCESS)
 }
 
 /// `wally resume`.
 fn resume() -> Result<ExitCode> {
-    engine::resume()?;
+    if via_daemon() {
+        client::call(&protocol::Command::Resume)?;
+    } else {
+        engine::resume()?;
+    }
     let config = Config::load_or_init()?;
     println!("resumed: next change in {}", config.interval);
     Ok(ExitCode::SUCCESS)
@@ -632,6 +685,19 @@ fn marked(mark: Mark, image: &Path, on: bool) -> String {
 /// `wally favorite` and `wally ban`.
 fn mark(mark: Mark, image: Option<&Path>, which: Option<&str>, off: bool) -> Result<ExitCode> {
     let image = image_to_mark(image, which)?;
+    if via_daemon() {
+        let target = Target {
+            image: Some(image.display().to_string()),
+            screen: None,
+            on: !off,
+        };
+        client::call(&match mark {
+            Mark::Favorite => protocol::Command::Favorite(target),
+            Mark::Ban => protocol::Command::Ban(target),
+        })?;
+        println!("{}", marked(mark, &image, !off));
+        return Ok(ExitCode::SUCCESS);
+    }
     let config = Config::load_or_init()?;
     let changes = engine::mark(&config, mark, &image, !off)?;
     println!("{}", marked(mark, &image, !off));
@@ -665,6 +731,15 @@ fn search(words: &[String], full: bool, json: bool, regex: bool, deep: bool) -> 
     })
 }
 
+/// `folder` as the daemon reads it: relative to the current directory
+/// unless it starts with `/` or `~`.
+fn folder_argument(folder: &str) -> Result<String> {
+    if folder.starts_with('/') || folder.starts_with('~') {
+        return Ok(folder.to_string());
+    }
+    Ok(env::current_dir()?.join(folder).display().to_string())
+}
+
 /// `wally settings`.
 fn settings(action: Settings) -> Result<ExitCode> {
     let path = paths::config_file();
@@ -680,16 +755,36 @@ fn settings(action: Settings) -> Result<ExitCode> {
         Settings::Path => println!("{}", path.display()),
         Settings::Get { key } => println!("{}", config.get(key)),
         Settings::Set { key, value } => {
-            config.set(key, &value)?;
-            config.write(&path)?;
+            if via_daemon() {
+                let command = protocol::Command::ConfigSet {
+                    key: key.to_string(),
+                    value,
+                };
+                config = serde_json::from_value(client::call(&command)?)?;
+            } else {
+                config.set(key, &value)?;
+                config.write(&path)?;
+            }
             println!("{key}: {}", config.get(key));
         }
         Settings::Source { action } => {
-            match action {
-                Source::Add { folder } => config.add_source(&folder)?,
-                Source::Remove { folder } => config.remove_source(&folder)?,
+            if via_daemon() {
+                let command = match action {
+                    Source::Add { folder } => protocol::Command::SourceAdd {
+                        folder: folder_argument(&folder)?,
+                    },
+                    Source::Remove { folder } => protocol::Command::SourceRemove {
+                        folder: folder_argument(&folder)?,
+                    },
+                };
+                config = serde_json::from_value(client::call(&command)?)?;
+            } else {
+                match action {
+                    Source::Add { folder } => config.add_source(&folder)?,
+                    Source::Remove { folder } => config.remove_source(&folder)?,
+                }
+                config.write(&path)?;
             }
-            config.write(&path)?;
             for source in &config.sources {
                 println!("{source}");
             }
