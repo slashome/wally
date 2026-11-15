@@ -87,7 +87,7 @@ wally settings edit          # $EDITOR, checked before it is saved
 Wally owns the rotation: the daemon draws the next images and puts them on each screen through `NSWorkspace`, so `wally show` reads the exact file from macOS — no screen capture, no guessing. A screen plugged in gets its image within seconds, without waiting for the interval.
 
 - Setting a wallpaper this way replaces the rotating folder of System Settings with a fixed image per screen: wally becomes the one rotating them.
-- macOS applies it to the current Space of each screen.
+- macOS only sets the wallpaper of the current Space, fullscreen apps included. So the daemon puts the chosen image back on any Space that shows another one, within seconds of it coming up: every Space follows, and a wallpaper picked by hand in System Settings is replaced. Without the daemon, `wally next` only changes the current Space.
 - The daemon is a LaunchAgent, `~/Library/LaunchAgents/me.slashome.wally.plist`; it logs in `~/Library/Logs/wally/wally.log` and keeps its state in `~/.local/state/wally/`.
 
 ## Uninstall
