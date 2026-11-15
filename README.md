@@ -2,7 +2,7 @@
 
 **Wally** rotates your wallpapers, screen by screen. A small daemon changes them at every interval; the `wally` command tells you which image is on which screen, changes them on demand and edits the settings.
 
-macOS only for now. A menu bar app comes next.
+macOS only for now, with a [menu bar app](#menu-bar-app) on top of the command line.
 
 ## Install
 
@@ -31,6 +31,28 @@ The script downloads the latest release (or builds it with `cargo` when there is
 | `WALLY_NO_DAEMON=1` | install the binary only |
 
 From source: `cargo install --git https://github.com/slashome/wally`, then `wally init`.
+
+## Menu bar app
+
+<p><img src="assets/app-icon.png" alt="The Wally app icon" width="128" align="right"></p>
+
+**Wally.app** drives the daemon from the menu bar:
+
+- the image on each screen, with its name and folder;
+- **Next**, for every screen or one, and **Pause** to keep the current images;
+- **favorites** to see an image more often, **bans** to never see it again;
+- the **library** of every image the sources hold, and the **history** of what each screen showed;
+- the **settings**: sources, interval, order, one image per screen or the same everywhere.
+
+It needs the `wally` command and its daemon, which the cask installs first:
+
+```sh
+brew install --cask slashome/tap/wally-app
+```
+
+The app is signed ad hoc, not notarized by Apple. On first launch macOS refuses to open it: open **System Settings › Privacy & Security**, find the message about Wally near the bottom and click **Open Anyway**, then confirm. macOS remembers the choice until the next update.
+
+To build it from source, with the Swift toolchain of the Xcode Command Line Tools: `app/scripts/bundle.sh` writes `app/build/Wally.app`, a universal binary signed ad hoc; `--zip` also packs `app/build/Wally-<version>.zip`.
 
 ## Commands
 
@@ -104,6 +126,7 @@ Wally owns the rotation: the daemon draws the next images and puts them on each 
 ## Uninstall
 
 ```sh
+brew uninstall --cask --zap wally-app
 wally daemon uninstall
 rm ~/.local/bin/wally
 rm -r ~/.config/wally ~/.local/state/wally ~/Library/Logs/wally
