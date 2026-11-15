@@ -60,8 +60,8 @@ struct ResponseDecodingTests {
 
     @Test func libraryIsAListOfItems() throws {
         let line = data(#"{"id": 4, "ok": true, "result": [{"path": "/path/forest.jpg", "name": "forest.jpg", "favorite": true}]}"#)
-        #expect(try ResponseDecoder.result([LibraryItem].self, from: line) == [
-            LibraryItem(path: "/path/forest.jpg", name: "forest.jpg", favorite: true),
+        #expect(try ResponseDecoder.result([LibraryImage].self, from: line) == [
+            LibraryImage(path: "/path/forest.jpg", name: "forest.jpg", favorite: true),
         ])
     }
 

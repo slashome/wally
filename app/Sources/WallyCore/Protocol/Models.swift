@@ -167,7 +167,7 @@ public struct HistoryEntry: Decodable, Equatable, Hashable, Identifiable, Sendab
     }
 }
 
-public struct LibraryItem: Decodable, Equatable, Hashable, Identifiable, Sendable {
+public struct LibraryImage: Decodable, Equatable, Hashable, Identifiable, Sendable {
     public var path: String
     public var name: String
     public var favorite: Bool

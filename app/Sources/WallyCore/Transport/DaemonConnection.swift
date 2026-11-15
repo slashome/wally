@@ -94,8 +94,8 @@ public extension DaemonCommanding {
         try await send(.history(limit: limit), expecting: [HistoryEntry].self)
     }
 
-    func library(query: String?) async throws -> [LibraryItem] {
-        try await send(.library(query: query), expecting: [LibraryItem].self)
+    func library(query: String?) async throws -> [LibraryImage] {
+        try await send(.library(query: query), expecting: [LibraryImage].self)
     }
 
     func config(after command: DaemonCommand) async throws -> Config {
