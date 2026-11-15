@@ -12,4 +12,6 @@ pub mod launchd;
 pub mod library;
 pub mod marks;
 pub mod paths;
+pub mod protocol;
 pub mod rotation;
+pub mod server;
