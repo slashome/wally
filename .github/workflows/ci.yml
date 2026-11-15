@@ -29,3 +29,18 @@ jobs:
 
       - name: Test
         run: cargo test --verbose
+
+  app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the app
+        run: swift build --package-path app
+
+      - name: Test the app
+        if: hashFiles('app/Tests/**') != ''
+        run: swift test --package-path app
+
+      - name: Bundle the app
+        run: app/scripts/bundle.sh
