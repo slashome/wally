@@ -9,5 +9,6 @@ pub mod engine;
 pub mod init;
 pub mod launchd;
 pub mod library;
+pub mod marks;
 pub mod paths;
 pub mod rotation;

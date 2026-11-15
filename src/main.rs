@@ -13,15 +13,18 @@ use serde_json::json;
 use wally::config::{Config, Key};
 use wally::desktop::{self, Screen};
 use wally::engine::{self, Targets};
+use wally::marks::Mark;
 use wally::rotation::State;
 use wally::{banner, daemon, launchd, library, paths};
 
 /// What the bare `wally help` lists after the commands.
 const AFTER_HELP: &str = "\
 Files
-  ~/.config/wally/config.yaml      the configuration (wally settings)
-  ~/.local/state/wally/state.json  what each screen shows, what comes next
-  ~/Library/Logs/wally/wally.log   the daemon log
+  ~/.config/wally/config.yaml         the configuration (wally settings)
+  ~/.config/wally/marks.yaml          favorite and banned images
+  ~/.local/state/wally/state.json     what each screen shows, what comes next
+  ~/.local/state/wally/history.jsonl  the images shown, newest last
+  ~/Library/Logs/wally/wally.log      the daemon log
 
 Environment
   WALLY_NO_BANNER   hide the banner
@@ -97,6 +100,35 @@ enum Command {
         /// Say nothing.
         #[arg(long, short)]
         quiet: bool,
+    },
+    /// Mark an image as a favorite: it comes three times as often.
+    ///
+    /// The image on the first screen by default, or on the one given. In
+    /// sequential order a favorite still comes once per lap.
+    Favorite {
+        /// The image, instead of the one on the screen.
+        image: Option<PathBuf>,
+        /// The screen whose image to mark: its number in `wally show`, or
+        /// part of its name.
+        #[arg(long, short)]
+        screen: Option<String>,
+        /// Remove the mark instead.
+        #[arg(long)]
+        off: bool,
+    },
+    /// Ban an image: it never comes again, and leaves the screens showing it.
+    ///
+    /// The image on the first screen by default, or on the one given.
+    Ban {
+        /// The image, instead of the one on the screen.
+        image: Option<PathBuf>,
+        /// The screen whose image to ban: its number in `wally show`, or part
+        /// of its name.
+        #[arg(long, short)]
+        screen: Option<String>,
+        /// Lift the ban instead.
+        #[arg(long)]
+        off: bool,
     },
     /// Find images of the sources by file name.
     ///
@@ -239,6 +271,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Status { json } => status(json),
         Command::Show { paths, json } => show(paths, json),
         Command::Next { screen, quiet } => next(screen.as_deref(), quiet),
+        Command::Favorite { image, screen, off } => {
+            mark(Mark::Favorite, image.as_deref(), screen.as_deref(), off)
+        }
+        Command::Ban { image, screen, off } => {
+            mark(Mark::Ban, image.as_deref(), screen.as_deref(), off)
+        }
         Command::Search {
             words,
             paths,
@@ -452,10 +490,55 @@ fn next(screen: Option<&str>, quiet: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// `image` as an absolute path, read from the current directory.
+fn absolute(image: &Path) -> Result<PathBuf> {
+    if image.is_absolute() {
+        return Ok(image.to_path_buf());
+    }
+    let full = env::current_dir()?.join(image);
+    Ok(full.canonicalize().unwrap_or(full))
+}
+
+/// The image `wally favorite` or `wally ban` marks: the one named, or the one
+/// on the screen `which` names, or on the first screen.
+fn image_to_mark(image: Option<&Path>, which: Option<&str>) -> Result<PathBuf> {
+    if let Some(image) = image {
+        return absolute(image);
+    }
+    let screen = match which {
+        Some(which) => Some(pick_screen(&desktop::screens()?, which)?),
+        None => None,
+    };
+    engine::marked_image(None, screen)
+}
+
+/// What `wally favorite` or `wally ban` says once done.
+fn marked(mark: Mark, image: &Path, on: bool) -> String {
+    let name = label(image, false);
+    match (mark, on) {
+        (Mark::Favorite, true) => format!("{name} is a favorite"),
+        (Mark::Favorite, false) => format!("{name} is no longer a favorite"),
+        (Mark::Ban, true) => format!("{name} is banned"),
+        (Mark::Ban, false) => format!("{name} is no longer banned"),
+    }
+}
+
+/// `wally favorite` and `wally ban`.
+fn mark(mark: Mark, image: Option<&Path>, which: Option<&str>, off: bool) -> Result<ExitCode> {
+    let image = image_to_mark(image, which)?;
+    let config = Config::load_or_init()?;
+    let changes = engine::mark(&config, mark, &image, !off)?;
+    println!("{}", marked(mark, &image, !off));
+    for c in changes {
+        println!("{}  {}", c.screen.name, label(&c.image, false));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// `wally search`.
 fn search(words: &[String], full: bool, json: bool, regex: bool, deep: bool) -> Result<ExitCode> {
     let config = Config::load_or_init()?;
-    let images = library::scan(&config.source_paths(), config.recursive || deep);
+    let images = engine::library(&config, deep);
     let found = library::search(&images, words, regex)?;
     if json {
         let value: Vec<_> = found

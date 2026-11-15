@@ -2,14 +2,15 @@
 //! screens, for `wally next` and the daemon alike.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::config::{Config, Spread};
 use crate::desktop::{self, Screen};
 use crate::library;
+use crate::marks::{Mark, Marks};
 use crate::paths;
 use crate::rotation::State;
 
@@ -66,7 +67,8 @@ pub fn change(config: &Config, targets: &Targets) -> Result<Vec<Change>> {
     if chosen.is_empty() {
         return Ok(Vec::new());
     }
-    let images = library::scan(&config.source_paths(), config.recursive);
+    let marks = Marks::load(&paths::marks_file());
+    let images = marks.keep(library::scan(&config.source_paths(), config.recursive));
     if images.is_empty() {
         bail!(
             "no image in {}: add a folder with `wally settings source add <folder>`",
@@ -83,7 +85,13 @@ pub fn change(config: &Config, targets: &Targets) -> Result<Vec<Change>> {
     };
     let mut drawn = match reused {
         Some(image) => vec![image],
-        None => state.draw(&images, count, config.order, &mut fastrand::Rng::new()),
+        None => state.draw(
+            &images,
+            &marks.favorite_set(),
+            count,
+            config.order,
+            &mut fastrand::Rng::new(),
+        ),
     };
     if config.screens == Spread::Same {
         drawn = vec![drawn[0].clone(); chosen.len()];
@@ -105,6 +113,75 @@ pub fn change(config: &Config, targets: &Targets) -> Result<Vec<Change>> {
     state.save(&state_path)?;
     settle(&changes);
     Ok(changes)
+}
+
+/// The images of the sources, banned ones left out; `deep` walks the
+/// subfolders even when the configuration does not.
+pub fn library(config: &Config, deep: bool) -> Vec<PathBuf> {
+    let marks = Marks::load(&paths::marks_file());
+    marks.keep(library::scan(
+        &config.source_paths(),
+        config.recursive || deep,
+    ))
+}
+
+/// The screen with display id `id`, among the connected ones.
+pub fn screen(id: u32) -> Result<Screen> {
+    desktop::screens()?
+        .into_iter()
+        .find(|s| s.id == id)
+        .with_context(|| format!("no screen with id {id}"))
+}
+
+/// The image a mark applies to: `image` when given, otherwise the image on
+/// the screen with display id `screen`, or on the first screen.
+pub fn marked_image(image: Option<&Path>, screen: Option<u32>) -> Result<PathBuf> {
+    if let Some(image) = image {
+        if !image.is_absolute() {
+            bail!("{} is not an absolute path", image.display());
+        }
+        return Ok(image.to_path_buf());
+    }
+    let shown = match screen {
+        Some(id) => self::screen(id)?,
+        None => desktop::screens()?
+            .into_iter()
+            .next()
+            .context("no screen is connected")?,
+    };
+    match shown.wallpaper {
+        Some(path) if path.is_file() => Ok(path),
+        _ => bail!("{} shows no image wally can mark", shown.name),
+    }
+}
+
+/// Marks `image` as `mark`, or unmarks it when `on` is false, in the marks
+/// file. Banning an image some screens show replaces it there at once; the
+/// changes made are returned.
+pub fn mark(config: &Config, mark: Mark, image: &Path, on: bool) -> Result<Vec<Change>> {
+    let path = paths::marks_file();
+    let mut marks = Marks::read(&path)?;
+    if on && mark == Mark::Favorite && !image.is_file() {
+        bail!("{} is not an image", image.display());
+    }
+    marks.set(mark, image, on);
+    marks.write(&path)?;
+    if mark != Mark::Ban || !on {
+        return Ok(Vec::new());
+    }
+    let state = State::load(&paths::state_file());
+    let showing: Vec<u32> = desktop::screens()?
+        .iter()
+        .filter(|s| {
+            s.wallpaper.as_deref() == Some(image)
+                || state.shown.get(&s.id).map(PathBuf::as_path) == Some(image)
+        })
+        .map(|s| s.id)
+        .collect();
+    if showing.is_empty() {
+        return Ok(Vec::new());
+    }
+    change(config, &Targets::Only(showing))
 }
 
 /// The screens whose current Space shows something other than the image
@@ -168,7 +245,6 @@ fn settle(changes: &[Change]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     fn screen(id: u32, wallpaper: Option<&Path>) -> Screen {
         Screen {

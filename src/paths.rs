@@ -1,7 +1,8 @@
-//! Where wally keeps its files: the configuration under `~/.config/wally`, the
-//! rotation state and the daemon lock under `~/.local/state/wally`, the daemon
-//! log under `~/Library/Logs/wally`. `XDG_CONFIG_HOME` and `XDG_STATE_HOME`
-//! are honoured.
+//! Where wally keeps its files: the configuration and the marks under
+//! `~/.config/wally`, the rotation state, the history, the daemon lock and its
+//! socket under `~/.local/state/wally`, the daemon log under
+//! `~/Library/Logs/wally`. `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are
+//! honoured.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -40,6 +41,21 @@ pub fn state_dir() -> PathBuf {
 /// screen has.
 pub fn state_file() -> PathBuf {
     state_dir().join("state.json")
+}
+
+/// The marks file, `~/.config/wally/marks.yaml`: favorite and banned images.
+pub fn marks_file() -> PathBuf {
+    config_dir().join("marks.yaml")
+}
+
+/// The history of the images put on the screens, one entry per line.
+pub fn history_file() -> PathBuf {
+    state_dir().join("history.jsonl")
+}
+
+/// The Unix socket the running daemon listens on.
+pub fn socket_file() -> PathBuf {
+    state_dir().join("wally.sock")
 }
 
 /// The lock the running daemon holds, with its pid inside.
