@@ -21,6 +21,13 @@ struct WallyApp: App {
             Image(nsImage: RobotIcon.image(paused: model.status?.paused ?? false))
         }
         .menuBarExtraStyle(.window)
+
+        Window(LocalizedKey.appName.text, id: WindowID.main) {
+            MainWindow()
+                .environment(model)
+        }
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 900, height: 620)
     }
 }
 
