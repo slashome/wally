@@ -14,9 +14,8 @@ use crate::daemon;
 use crate::paths;
 use crate::protocol::{self, Command, Request, Response};
 
-/// How long the CLI waits for an answer; a change can take a few seconds to
-/// settle.
-const TIMEOUT: Duration = Duration::from_secs(60);
+/// How long the CLI waits for an answer from the daemon.
+const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Who carries out a command that changes something.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -380,7 +380,7 @@ fn status(json: bool) -> Result<ExitCode> {
     let pid = daemon::running_pid();
     let installed = launchd::installed();
     let next = daemon::next_change(&state, &config);
-    let screens = desktop::screens().unwrap_or_default();
+    let screens = engine::screens().unwrap_or_default();
     if json {
         let value = json!({
             "daemon": { "installed": installed, "running": pid.is_some(), "pid": pid },
@@ -466,7 +466,7 @@ fn status(json: bool) -> Result<ExitCode> {
 
 /// `wally show`.
 fn show(full: bool, json: bool) -> Result<ExitCode> {
-    let screens = desktop::screens()?;
+    let screens = engine::screens()?;
     if json {
         let value: Vec<_> = screens
             .iter()

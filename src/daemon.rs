@@ -187,7 +187,7 @@ impl Daemon {
         let state = State::load(&paths::state_file());
         let marks = Marks::load(&paths::marks_file());
         let images = engine::library(&self.config, false).len();
-        let screens = desktop::screens()?;
+        let screens = engine::screens()?;
         Ok(Status::new(&Snapshot {
             config: &self.config,
             state: &state,

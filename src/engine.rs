@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
@@ -15,15 +15,11 @@ use crate::marks::{Mark, Marks};
 use crate::paths;
 use crate::rotation::State;
 
-/// How long a change waits for macOS to report the new images.
-const SETTLE: Duration = Duration::from_secs(5);
-
-/// How long after a change the Spaces are left alone, while macOS still
-/// reports its default picture on the screens just changed.
+/// How long after a change macOS may still report its default picture on the
+/// screens just changed, while WallpaperAgent decodes and fades the new image
+/// in: within it, wally trusts the image it set over what macOS reports, and
+/// leaves the Spaces alone.
 const QUIET: Duration = Duration::from_secs(10);
-
-/// How often a change asks macOS whether the new images are in place.
-const SETTLE_POLL: Duration = Duration::from_millis(100);
 
 /// Which screens a change touches.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,7 +109,6 @@ pub fn change(config: &Config, targets: &Targets) -> Result<Vec<Change>> {
     }
     state.save(&state_path)?;
     history::record(&paths::history_file(), &changes)?;
-    settle(&changes);
     Ok(changes)
 }
 
@@ -138,7 +133,6 @@ pub fn set(screen: u32, image: &Path) -> Result<Change> {
         image: image.to_path_buf(),
     };
     history::record(&paths::history_file(), std::slice::from_ref(&change))?;
-    settle(std::slice::from_ref(&change));
     Ok(change)
 }
 
@@ -245,44 +239,46 @@ fn strays(screens: &[Screen], state: &State) -> Vec<(Screen, PathBuf)> {
 /// how every Space — the desktop left for a fullscreen app included — catches
 /// up with the rotation once it is shown.
 pub fn follow() -> Result<Vec<Change>> {
-    let state_path = paths::state_file();
-    let recent = fs::metadata(&state_path)
-        .and_then(|m| m.modified())
-        .is_ok_and(|t| t.elapsed().unwrap_or_default() < QUIET);
-    if recent {
+    if changed_lately() {
         return Ok(Vec::new());
     }
-    let state = State::load(&state_path);
+    let state = State::load(&paths::state_file());
     let screens = desktop::screens()?;
     let mut changes = Vec::new();
     for (screen, image) in strays(&screens, &state) {
         desktop::set_wallpaper(screen.id, &image)?;
         changes.push(Change { screen, image });
     }
-    settle(&changes);
     Ok(changes)
 }
 
-/// Waits until macOS reports the image of every change, for [`SETTLE`] at
-/// most: right after a change it still reports its default desktop picture
-/// for a moment, and a `wally show` run then would say so.
-fn settle(changes: &[Change]) {
-    let started = Instant::now();
-    while started.elapsed() < SETTLE {
-        let Ok(screens) = desktop::screens() else {
-            return;
-        };
-        let settled = changes.iter().all(|c| {
-            screens
-                .iter()
-                .find(|s| s.id == c.screen.id)
-                .is_none_or(|s| s.wallpaper.as_ref() == Some(&c.image))
-        });
-        if settled {
-            return;
+/// Whether the state file was written within [`QUIET`], so a change may still
+/// be on its way to the screen.
+fn changed_lately() -> bool {
+    fs::metadata(paths::state_file())
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| t.elapsed().unwrap_or_default() < QUIET)
+}
+
+/// `screens` with the image wally just set in place of what macOS reports,
+/// when a change happened lately and macOS does not report it yet.
+fn with_pending(mut screens: Vec<Screen>, state: &State, lately: bool) -> Vec<Screen> {
+    if lately {
+        for screen in &mut screens {
+            if let Some(image) = state.shown.get(&screen.id) {
+                screen.wallpaper = Some(image.clone());
+            }
         }
-        desktop::pump(SETTLE_POLL);
     }
+    screens
+}
+
+/// The screens and what they show: what macOS reports, except right after a
+/// change, where the image wally just set is reported without waiting for
+/// macOS to catch up.
+pub fn screens() -> Result<Vec<Screen>> {
+    let state = State::load(&paths::state_file());
+    Ok(with_pending(desktop::screens()?, &state, changed_lately()))
 }
 
 #[cfg(test)]
@@ -317,5 +313,19 @@ mod tests {
         let strays = strays(&screens, &state);
         assert_eq!(strays.len(), 1);
         assert_eq!((strays[0].0.id, &strays[0].1), (2, &chosen));
+    }
+
+    #[test]
+    fn a_recent_change_is_reported_before_macos_catches_up() {
+        let chosen = PathBuf::from("/w/chosen.jpg");
+        let default = PathBuf::from("/System/Library/CoreServices/DefaultDesktop.heic");
+        let mut state = State::default();
+        state.shown.insert(1, chosen.clone());
+        let reported = vec![screen(1, Some(&default)), screen(2, Some(&default))];
+        let lately = with_pending(reported.clone(), &state, true);
+        assert_eq!(lately[0].wallpaper, Some(chosen));
+        assert_eq!(lately[1].wallpaper, Some(default.clone()));
+        let later = with_pending(reported, &state, false);
+        assert_eq!(later[0].wallpaper, Some(default));
     }
 }
