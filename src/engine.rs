@@ -1,6 +1,7 @@
 //! Changing wallpapers: drawing the next images and putting them on the
 //! screens, for `wally next` and the daemon alike.
 
+use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -14,6 +15,10 @@ use crate::rotation::State;
 
 /// How long a change waits for macOS to report the new images.
 const SETTLE: Duration = Duration::from_secs(5);
+
+/// How long after a change the Spaces are left alone, while macOS still
+/// reports its default picture on the screens just changed.
+const QUIET: Duration = Duration::from_secs(10);
 
 /// How often a change asks macOS whether the new images are in place.
 const SETTLE_POLL: Duration = Duration::from_millis(100);
@@ -92,13 +97,49 @@ pub fn change(config: &Config, targets: &Targets) -> Result<Vec<Change>> {
             image,
         });
     }
-    settle(&changes);
     let present: Vec<u32> = screens.iter().map(|s| s.id).collect();
     state.shown.retain(|id, _| present.contains(id));
     if *targets != Targets::Undressed {
         state.last_change = Some(SystemTime::now());
     }
     state.save(&state_path)?;
+    settle(&changes);
+    Ok(changes)
+}
+
+/// The screens whose current Space shows something other than the image
+/// wally put on them, with that image, as long as it still exists.
+fn strays(screens: &[Screen], state: &State) -> Vec<(Screen, PathBuf)> {
+    screens
+        .iter()
+        .filter_map(|screen| {
+            let image = state.shown.get(&screen.id)?;
+            let stray = screen.wallpaper.as_ref() != Some(image) && image.is_file();
+            stray.then(|| (screen.clone(), image.clone()))
+        })
+        .collect()
+}
+
+/// Puts back the image wally chose on every screen whose current Space shows
+/// another one. macOS only sets the wallpaper of the current Space, so this is
+/// how every Space — the desktop left for a fullscreen app included — catches
+/// up with the rotation once it is shown.
+pub fn follow() -> Result<Vec<Change>> {
+    let state_path = paths::state_file();
+    let recent = fs::metadata(&state_path)
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| t.elapsed().unwrap_or_default() < QUIET);
+    if recent {
+        return Ok(Vec::new());
+    }
+    let state = State::load(&state_path);
+    let screens = desktop::screens()?;
+    let mut changes = Vec::new();
+    for (screen, image) in strays(&screens, &state) {
+        desktop::set_wallpaper(screen.id, &image)?;
+        changes.push(Change { screen, image });
+    }
+    settle(&changes);
     Ok(changes)
 }
 
@@ -121,5 +162,41 @@ fn settle(changes: &[Change]) {
             return;
         }
         desktop::pump(SETTLE_POLL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn screen(id: u32, wallpaper: Option<&Path>) -> Screen {
+        Screen {
+            id,
+            name: format!("Screen {id}"),
+            x: id as f64,
+            wallpaper: wallpaper.map(Path::to_path_buf),
+        }
+    }
+
+    #[test]
+    fn only_screens_showing_another_image_stray() {
+        let dir = tempfile::tempdir().unwrap();
+        let chosen = dir.path().join("chosen.jpg");
+        std::fs::write(&chosen, b"").unwrap();
+        let other = dir.path().join("other.jpg");
+        let mut state = State::default();
+        state.shown.insert(1, chosen.clone());
+        state.shown.insert(2, chosen.clone());
+        state.shown.insert(3, dir.path().join("gone.jpg"));
+        let screens = vec![
+            screen(1, Some(&chosen)),
+            screen(2, Some(&other)),
+            screen(3, Some(&other)),
+            screen(4, Some(&other)),
+        ];
+        let strays = strays(&screens, &state);
+        assert_eq!(strays.len(), 1);
+        assert_eq!((strays[0].0.id, &strays[0].1), (2, &chosen));
     }
 }

@@ -104,7 +104,13 @@ pub fn run() -> Result<()> {
         } else {
             Targets::Undressed
         };
-        match engine::change(&config, &targets) {
+        let changed = engine::change(&config, &targets).and_then(|mut changes| {
+            if !due {
+                changes.extend(engine::follow()?);
+            }
+            Ok(changes)
+        });
+        match changed {
             Ok(changes) => {
                 last_error.clear();
                 for c in changes {

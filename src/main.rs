@@ -442,6 +442,12 @@ fn next(screen: Option<&str>, quiet: bool) -> Result<ExitCode> {
         for c in changes {
             println!("{}  {}", c.screen.name, label(&c.image, false));
         }
+        if daemon::running_pid().is_none() {
+            eprintln!(
+                "note: macOS only changed the current Space; start the daemon \
+                 (`wally daemon install`) so the other Spaces follow"
+            );
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
