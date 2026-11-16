@@ -1,6 +1,6 @@
 [package]
 name = "wally"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.89"
 description = "Rotates your wallpapers, screen by screen, from a small daemon you drive on the command line."

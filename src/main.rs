@@ -10,18 +10,23 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::json;
 
+use wally::client::{self, Route};
 use wally::config::{Config, Key};
 use wally::desktop::{self, Screen};
 use wally::engine::{self, Targets};
+use wally::marks::{Mark, Marks};
+use wally::protocol::{self, Status, Target};
 use wally::rotation::State;
 use wally::{banner, daemon, launchd, library, paths};
 
 /// What the bare `wally help` lists after the commands.
 const AFTER_HELP: &str = "\
 Files
-  ~/.config/wally/config.yaml      the configuration (wally settings)
-  ~/.local/state/wally/state.json  what each screen shows, what comes next
-  ~/Library/Logs/wally/wally.log   the daemon log
+  ~/.config/wally/config.yaml         the configuration (wally settings)
+  ~/.config/wally/marks.yaml          favorite and banned images
+  ~/.local/state/wally/state.json     what each screen shows, what comes next
+  ~/.local/state/wally/history.jsonl  the images shown, newest last
+  ~/Library/Logs/wally/wally.log      the daemon log
 
 Environment
   WALLY_NO_BANNER   hide the banner
@@ -97,6 +102,62 @@ enum Command {
         /// Say nothing.
         #[arg(long, short)]
         quiet: bool,
+    },
+    /// Put an image on a screen now, and restart the interval.
+    Set {
+        /// The image.
+        image: PathBuf,
+        /// The screen: its number in `wally show`, or part of its name; the
+        /// first one by default.
+        #[arg(long, short)]
+        screen: Option<String>,
+    },
+    /// Stop changing the wallpapers on schedule, until `wally resume`.
+    ///
+    /// The Spaces still follow, and `wally next` still changes.
+    Pause,
+    /// Change the wallpapers on schedule again, the interval counted from now.
+    Resume,
+    /// The images shown lately, newest first.
+    History {
+        /// How many entries.
+        #[arg(long, short, default_value_t = 20)]
+        limit: usize,
+        /// Full paths instead of file names.
+        #[arg(long, conflicts_with = "json")]
+        paths: bool,
+        /// JSON output (at, screen_id, screen_name, image).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark an image as a favorite: it comes three times as often.
+    ///
+    /// The image on the first screen by default, or on the one given. In
+    /// sequential order a favorite still comes once per lap.
+    Favorite {
+        /// The image, instead of the one on the screen.
+        image: Option<PathBuf>,
+        /// The screen whose image to mark: its number in `wally show`, or
+        /// part of its name.
+        #[arg(long, short)]
+        screen: Option<String>,
+        /// Remove the mark instead.
+        #[arg(long)]
+        off: bool,
+    },
+    /// Ban an image: it never comes again, and leaves the screens showing it.
+    ///
+    /// The image on the first screen by default, or on the one given.
+    Ban {
+        /// The image, instead of the one on the screen.
+        image: Option<PathBuf>,
+        /// The screen whose image to ban: its number in `wally show`, or part
+        /// of its name.
+        #[arg(long, short)]
+        screen: Option<String>,
+        /// Lift the ban instead.
+        #[arg(long)]
+        off: bool,
     },
     /// Find images of the sources by file name.
     ///
@@ -239,6 +300,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Status { json } => status(json),
         Command::Show { paths, json } => show(paths, json),
         Command::Next { screen, quiet } => next(screen.as_deref(), quiet),
+        Command::Set { image, screen } => set(&image, screen.as_deref()),
+        Command::Pause => pause(),
+        Command::Resume => resume(),
+        Command::History { limit, paths, json } => history(limit, paths, json),
+        Command::Favorite { image, screen, off } => {
+            mark(Mark::Favorite, image.as_deref(), screen.as_deref(), off)
+        }
+        Command::Ban { image, screen, off } => {
+            mark(Mark::Ban, image.as_deref(), screen.as_deref(), off)
+        }
         Command::Search {
             words,
             paths,
@@ -304,17 +375,21 @@ fn init(yes: bool, sources: Vec<String>, no_daemon: bool) -> Result<ExitCode> {
 fn status(json: bool) -> Result<ExitCode> {
     let config = Config::load_or_init()?;
     let state = State::load(&paths::state_file());
-    let images = library::scan(&config.source_paths(), config.recursive);
+    let images = engine::library(&config, false);
+    let marks = Marks::load(&paths::marks_file());
     let pid = daemon::running_pid();
     let installed = launchd::installed();
     let next = daemon::next_change(&state, &config);
-    let screens = desktop::screens().unwrap_or_default();
+    let screens = engine::screens().unwrap_or_default();
     if json {
         let value = json!({
             "daemon": { "installed": installed, "running": pid.is_some(), "pid": pid },
             "config": paths::config_file(),
             "sources": config.source_paths(),
             "images": images.len(),
+            "paused": state.paused,
+            "favorites": marks.favorites.len(),
+            "banned": marks.banned.len(),
             "interval": config.interval,
             "order": config.order.to_string(),
             "screens": config.screens.to_string(),
@@ -342,7 +417,16 @@ fn status(json: bool) -> Result<ExitCode> {
             &format!("{}{missing}", paths::tilde(source)),
         );
     }
-    row("images", &images.len().to_string());
+    row(
+        "images",
+        &format!(
+            "{}, {} favorite{}, {} banned",
+            images.len(),
+            marks.favorites.len(),
+            if marks.favorites.len() == 1 { "" } else { "s" },
+            marks.banned.len()
+        ),
+    );
     row(
         "rotation",
         &format!(
@@ -361,6 +445,7 @@ fn status(json: bool) -> Result<ExitCode> {
         );
     }
     match (next, pid) {
+        _ if state.paused => row("next", "paused — `wally resume`"),
         (Some(next), Some(_)) => {
             let wait = next.duration_since(now).unwrap_or_default();
             row(
@@ -381,7 +466,7 @@ fn status(json: bool) -> Result<ExitCode> {
 
 /// `wally show`.
 fn show(full: bool, json: bool) -> Result<ExitCode> {
-    let screens = desktop::screens()?;
+    let screens = engine::screens()?;
     if json {
         let value: Vec<_> = screens
             .iter()
@@ -430,11 +515,40 @@ fn pick_screen(screens: &[Screen], which: &str) -> Result<u32> {
     }
 }
 
+/// Whether the running daemon carries out the commands that change
+/// something.
+fn via_daemon() -> bool {
+    client::current_route() == Route::Daemon
+}
+
+/// Runs `command` on the daemon and reads the status it answers.
+fn daemon_status(command: &protocol::Command) -> Result<Status> {
+    serde_json::from_value(client::call(command)?).context("the daemon answered no status")
+}
+
 /// `wally next`.
 fn next(screen: Option<&str>, quiet: bool) -> Result<ExitCode> {
+    let screen = match screen {
+        Some(which) => Some(pick_screen(&desktop::screens()?, which)?),
+        None => None,
+    };
+    if via_daemon() {
+        let status = daemon_status(&protocol::Command::Next { screen })?;
+        if !quiet {
+            for s in status
+                .screens
+                .iter()
+                .filter(|s| screen.is_none_or(|id| id == s.id))
+            {
+                let image = s.image.as_deref().map_or("?".into(), |p| label(p, false));
+                println!("{}  {image}", s.name);
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let config = Config::load_or_init()?;
     let targets = match screen {
-        Some(which) => Targets::Only(vec![pick_screen(&desktop::screens()?, which)?]),
+        Some(id) => Targets::Only(vec![id]),
         None => Targets::All,
     };
     let changes = engine::change(&config, &targets)?;
@@ -452,10 +566,151 @@ fn next(screen: Option<&str>, quiet: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The display id of the screen `which` names, or of the first screen.
+fn screen_or_first(which: Option<&str>) -> Result<u32> {
+    let screens = desktop::screens()?;
+    match which {
+        Some(which) => pick_screen(&screens, which),
+        None => screens
+            .first()
+            .map(|s| s.id)
+            .context("no screen is connected"),
+    }
+}
+
+/// `wally set`.
+fn set(image: &Path, which: Option<&str>) -> Result<ExitCode> {
+    let image = absolute(image)?;
+    let screen = screen_or_first(which)?;
+    if via_daemon() {
+        let command = protocol::Command::Set {
+            screen,
+            image: image.display().to_string(),
+        };
+        let status = daemon_status(&command)?;
+        let name = status
+            .screens
+            .iter()
+            .find(|s| s.id == screen)
+            .map_or(String::new(), |s| s.name.clone());
+        println!("{name}  {}", label(&image, false));
+        return Ok(ExitCode::SUCCESS);
+    }
+    let change = engine::set(screen, &image)?;
+    println!("{}  {}", change.screen.name, label(&change.image, false));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `wally pause`.
+fn pause() -> Result<ExitCode> {
+    if via_daemon() {
+        client::call(&protocol::Command::Pause)?;
+    } else {
+        engine::pause()?;
+    }
+    println!("paused: the wallpapers stay until `wally resume`");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `wally resume`.
+fn resume() -> Result<ExitCode> {
+    if via_daemon() {
+        client::call(&protocol::Command::Resume)?;
+    } else {
+        engine::resume()?;
+    }
+    let config = Config::load_or_init()?;
+    println!("resumed: next change in {}", config.interval);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `wally history`.
+fn history(limit: usize, full: bool, json: bool) -> Result<ExitCode> {
+    let entries = wally::history::read(&paths::history_file(), limit);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let width = entries
+        .iter()
+        .map(|e| e.screen_name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = io::stdout().lock();
+    for e in &entries {
+        writeln!(
+            out,
+            "{}  {:<width$}  {}",
+            e.at.replace('T', " ").trim_end_matches('Z'),
+            e.screen_name,
+            label(&e.image, full)
+        )?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `image` as an absolute path, read from the current directory.
+fn absolute(image: &Path) -> Result<PathBuf> {
+    if image.is_absolute() {
+        return Ok(image.to_path_buf());
+    }
+    let full = env::current_dir()?.join(image);
+    Ok(full.canonicalize().unwrap_or(full))
+}
+
+/// The image `wally favorite` or `wally ban` marks: the one named, or the one
+/// on the screen `which` names, or on the first screen.
+fn image_to_mark(image: Option<&Path>, which: Option<&str>) -> Result<PathBuf> {
+    if let Some(image) = image {
+        return absolute(image);
+    }
+    let screen = match which {
+        Some(which) => Some(pick_screen(&desktop::screens()?, which)?),
+        None => None,
+    };
+    engine::marked_image(None, screen)
+}
+
+/// What `wally favorite` or `wally ban` says once done.
+fn marked(mark: Mark, image: &Path, on: bool) -> String {
+    let name = label(image, false);
+    match (mark, on) {
+        (Mark::Favorite, true) => format!("{name} is a favorite"),
+        (Mark::Favorite, false) => format!("{name} is no longer a favorite"),
+        (Mark::Ban, true) => format!("{name} is banned"),
+        (Mark::Ban, false) => format!("{name} is no longer banned"),
+    }
+}
+
+/// `wally favorite` and `wally ban`.
+fn mark(mark: Mark, image: Option<&Path>, which: Option<&str>, off: bool) -> Result<ExitCode> {
+    let image = image_to_mark(image, which)?;
+    if via_daemon() {
+        let target = Target {
+            image: Some(image.display().to_string()),
+            screen: None,
+            on: !off,
+        };
+        client::call(&match mark {
+            Mark::Favorite => protocol::Command::Favorite(target),
+            Mark::Ban => protocol::Command::Ban(target),
+        })?;
+        println!("{}", marked(mark, &image, !off));
+        return Ok(ExitCode::SUCCESS);
+    }
+    let config = Config::load_or_init()?;
+    let changes = engine::mark(&config, mark, &image, !off)?;
+    println!("{}", marked(mark, &image, !off));
+    for c in changes {
+        println!("{}  {}", c.screen.name, label(&c.image, false));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// `wally search`.
 fn search(words: &[String], full: bool, json: bool, regex: bool, deep: bool) -> Result<ExitCode> {
     let config = Config::load_or_init()?;
-    let images = library::scan(&config.source_paths(), config.recursive || deep);
+    let images = engine::library(&config, deep);
     let found = library::search(&images, words, regex)?;
     if json {
         let value: Vec<_> = found
@@ -476,6 +731,15 @@ fn search(words: &[String], full: bool, json: bool, regex: bool, deep: bool) -> 
     })
 }
 
+/// `folder` as the daemon reads it: relative to the current directory
+/// unless it starts with `/` or `~`.
+fn folder_argument(folder: &str) -> Result<String> {
+    if folder.starts_with('/') || folder.starts_with('~') {
+        return Ok(folder.to_string());
+    }
+    Ok(env::current_dir()?.join(folder).display().to_string())
+}
+
 /// `wally settings`.
 fn settings(action: Settings) -> Result<ExitCode> {
     let path = paths::config_file();
@@ -491,16 +755,36 @@ fn settings(action: Settings) -> Result<ExitCode> {
         Settings::Path => println!("{}", path.display()),
         Settings::Get { key } => println!("{}", config.get(key)),
         Settings::Set { key, value } => {
-            config.set(key, &value)?;
-            config.write(&path)?;
+            if via_daemon() {
+                let command = protocol::Command::ConfigSet {
+                    key: key.to_string(),
+                    value,
+                };
+                config = serde_json::from_value(client::call(&command)?)?;
+            } else {
+                config.set(key, &value)?;
+                config.write(&path)?;
+            }
             println!("{key}: {}", config.get(key));
         }
         Settings::Source { action } => {
-            match action {
-                Source::Add { folder } => config.add_source(&folder)?,
-                Source::Remove { folder } => config.remove_source(&folder)?,
+            if via_daemon() {
+                let command = match action {
+                    Source::Add { folder } => protocol::Command::SourceAdd {
+                        folder: folder_argument(&folder)?,
+                    },
+                    Source::Remove { folder } => protocol::Command::SourceRemove {
+                        folder: folder_argument(&folder)?,
+                    },
+                };
+                config = serde_json::from_value(client::call(&command)?)?;
+            } else {
+                match action {
+                    Source::Add { folder } => config.add_source(&folder)?,
+                    Source::Remove { folder } => config.remove_source(&folder)?,
+                }
+                config.write(&path)?;
             }
-            config.write(&path)?;
             for source in &config.sources {
                 println!("{source}");
             }

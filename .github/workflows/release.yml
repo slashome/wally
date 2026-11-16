@@ -32,6 +32,11 @@ jobs:
             target/x86_64-apple-darwin/release/wally
           tar -czf "dist/wally-${GITHUB_REF_NAME}-universal-apple-darwin.tar.gz" -C dist wally
 
+      - name: Bundle the menu bar app
+        run: |
+          app/scripts/bundle.sh --zip "${GITHUB_REF_NAME}"
+          cp app/build/Wally-*.zip dist/
+
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -39,4 +44,5 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --title "Wally ${GITHUB_REF_NAME}" \
             --generate-notes \
-            dist/wally-*.tar.gz
+            dist/wally-*.tar.gz \
+            dist/Wally-*.zip
