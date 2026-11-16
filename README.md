@@ -42,13 +42,17 @@ From source: `cargo install --git https://github.com/slashome/wally`, then `wall
 - **Next**, for every screen or one, and **Pause** to keep the current images;
 - **favorites** to see an image more often, **bans** to never see it again;
 - the **library** of every image the sources hold, and the **history** of what each screen showed;
-- the **settings**: sources, interval, order, one image per screen or the same everywhere.
+- the **settings**: sources, interval, order, one image per screen or the same everywhere, and opening Wally at login.
+
+<p align="center"><img src="assets/menu-bar.png" alt="The Wally menu: the image on screen, the next change, Pause and Next" width="380"></p>
 
 It needs the `wally` command and its daemon, which the cask installs first:
 
 ```sh
 brew install --cask slashome/tap/wally-app
 ```
+
+The app holds no copy of `wally`: it drives the one the formula installs, so the command and the app never disagree. When the command is missing, or its daemon is not running or too old, the app says so and shows the command to run.
 
 The app is signed ad hoc, not notarized by Apple. On first launch macOS refuses to open it: open **System Settings › Privacy & Security**, find the message about Wally near the bottom and click **Open Anyway**, then confirm. macOS remembers the choice until the next update.
 
@@ -62,6 +66,10 @@ To build it from source, with the Swift toolchain of the Xcode Command Line Tool
 | `wally status` | whether the daemon runs, the sources and their image count, when the next change comes |
 | `wally show` | which image is on which screen, left to right (`--paths`, `--json`); alias `current` |
 | `wally next` | change now, every screen or one (`--screen 2`, `--screen dell`); alias `change` |
+| `wally pause`, `wally resume` | stop the scheduled changes and keep the current images, then start again |
+| `wally set <image>` | put this image on a screen (`--screen`) |
+| `wally favorite [image]`, `wally ban [image]` | show an image more often, or never again; the image on screen by default (`--screen`, `--off`) |
+| `wally history` | the images shown lately, newest first (`--limit`, `--paths`, `--json`) |
 | `wally search <words>` | images whose file name contains every word (`--paths`, `--json`, `--regex`, `--deep`) |
 | `wally settings` | print the configuration; `get`, `set`, `edit`, `path`, `source add\|remove` |
 | `wally daemon` | `install`, `uninstall`, `start`, `stop`, `restart` |
